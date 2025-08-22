@@ -33,7 +33,6 @@ jobs:
     - name: Install the project
       run: |
         uv sync --all-extras --dev
-        uv pip install third-party/bilevel-planning
         uv pip install third-party/prbench
     - name: Lint
       run: |
