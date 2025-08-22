@@ -5,12 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "prbench_rl"
 version = "0.1.0"
-description = "A basic starter for Python packages."
+description = "Reinforcement learning baselines for PRBench."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
    "matplotlib",
    "numpy",
+   "pandas",
+   "pandas-stubs",
+   "hydra-core",
+   "omegaconf",
 ]
 
 [project.optional-dependencies]
@@ -28,7 +32,7 @@ develop = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-prbench_rl = ["py.typed"]
+prbench_bilevel_planning = ["py.typed"]
 
 [tool.black]
 line-length = 88
@@ -38,7 +42,7 @@ target-version = ["py311"]
 py_version = 311
 profile = "black"
 multi_line_output = 2
-skip_glob = ["venv/*", ".venv/*"]
+skip_glob = ["venv/*", ".venv/*", "third-party/*"]
 split_on_trailing_comma = true
 
 [tool.docformatter]
@@ -50,10 +54,14 @@ wrap-descriptions = 88
 strict_equality = true
 disallow_untyped_calls = true
 warn_unreachable = true
-exclude = ["venv/*", ".venv/*"]
+exclude = ["venv/*", ".venv/*", "third-party/*"]
 
 [[tool.mypy.overrides]]
 module = [
     "matplotlib.*",
 ]
 ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--ignore=third-party"]
