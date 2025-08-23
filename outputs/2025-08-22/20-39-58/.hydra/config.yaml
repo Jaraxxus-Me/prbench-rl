@@ -1,0 +1,13 @@
+agent:
+  name: random
+env:
+  env_name: obstruction2d-o0
+  make_kwargs:
+    id: prbench/Obstruction2D-o0-v0
+mode: eval
+seed: 0
+train_steps: 10000
+eval_frequency: 1000
+eval_episodes: 2
+max_eval_steps: 1000
+load_agent_path: null

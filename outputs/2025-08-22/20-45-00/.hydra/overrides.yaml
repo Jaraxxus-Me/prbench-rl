@@ -1,0 +1,4 @@
+- agent=ppo
+- env=obstruction2d-o0
+- seed=42
+- eval_episodes=1

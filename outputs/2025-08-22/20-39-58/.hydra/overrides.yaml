@@ -1,0 +1,4 @@
+- agent=random
+- env=obstruction2d-o0
+- seed=0
+- eval_episodes=2
