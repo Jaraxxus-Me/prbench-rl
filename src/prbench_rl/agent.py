@@ -27,6 +27,10 @@ class BaseRLAgent(Agent[_O, _U]):
     def _get_action(self) -> _U:
         """Get action from the current policy."""
 
+    @abc.abstractmethod
+    def train(self) -> None:
+        """Train the agent (set to training mode)."""
+
     def _learn_from_transition(
         self,
         obs: _O,

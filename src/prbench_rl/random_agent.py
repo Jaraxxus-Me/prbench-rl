@@ -24,18 +24,13 @@ class RandomAgent(BaseRLAgent[_O, _U]):
         if not isinstance(action_space, (spaces.Discrete, spaces.Box)):
             # Will use fallback sampling for other space types
             pass
+        # Seed the action space for reproducible random actions
+        self.action_space.seed(seed)
 
     def _get_action(self) -> _U:
         """Sample a random action from the action space."""
-        if isinstance(self.action_space, spaces.Discrete):
-            # type: ignore[return-value]
-            return self._rng.integers(0, self.action_space.n)
-        if isinstance(self.action_space, spaces.Box):
-            # type: ignore[return-value]
-            return self._rng.uniform(
-                low=self.action_space.low,
-                high=self.action_space.high,
-                size=self.action_space.shape,
-            ).astype(self.action_space.dtype)
-        # Fallback to action space's own sampling for other space types
-        return self.action_space.sample()  # type: ignore[return-value]
+        return self.action_space.sample()
+
+    def train(self) -> None:
+        """Set the agent to training mode (no-op for random agent)."""
+        self._train_or_eval = "train"

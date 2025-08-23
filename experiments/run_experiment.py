@@ -22,7 +22,7 @@ from gymnasium.core import Env
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
-from prbench_rl import BaseRLAgent, PPOAgent, RandomAgent
+from prbench_rl import BaseRLAgent, create_rl_agents
 
 
 @hydra.main(version_base=None, config_name="config", config_path="conf/")
@@ -36,7 +36,7 @@ def _main(cfg: DictConfig) -> None:
     env = prbench.make(**cfg.env.make_kwargs)
 
     # Create the agent
-    agent = _create_agent(cfg.agent, env, cfg.seed)
+    agent = create_rl_agents(cfg.agent, env, cfg.seed)
 
     if cfg.mode == "train":
         # Training pipeline
@@ -89,20 +89,6 @@ def _main(cfg: DictConfig) -> None:
     with open(config_path, "w", encoding="utf-8") as f:
         OmegaConf.save(cfg, f)
     logging.info(f"Saved config to {config_path}")
-
-
-def _create_agent(agent_cfg: DictConfig, env: Env, seed: int) -> BaseRLAgent:
-    """Create agent based on configuration."""
-    if agent_cfg.name == "random":
-        return RandomAgent(env.observation_space, env.action_space, seed)
-    if agent_cfg.name == "ppo":
-        return PPOAgent(
-            env.observation_space,
-            env.action_space,
-            seed,
-            **agent_cfg.get("params", {}),
-        )
-    raise ValueError(f"Unknown agent type: {agent_cfg.name}")
 
 
 def _run_training(
