@@ -32,13 +32,17 @@ class BaseRLAgent(Agent[_O, _U]):
     def _get_action(self) -> _U:
         """Produce an action to execute now."""
 
-    def train(
+    def train(self) -> None:
+        """Switch to train mode."""
+        self._train_or_eval = "train"
+
+    def train_with_env(
         self,
         env: Env,
     ) -> list[dict[str, Any]]:
         """Training the agent with an interactive environment."""
         del env  # Unused
-        self._train_or_eval = "train"
+        self.train()
         return []
 
     def save(self, filepath: str) -> None:

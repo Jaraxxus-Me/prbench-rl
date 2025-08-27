@@ -34,7 +34,7 @@ def _main(cfg: DictConfig) -> None:
     if cfg.mode == "train":
         # Training pipeline
         logging.info("Starting training...")
-        train_metrics = agent.train(env)
+        train_metrics = agent.train_with_env(env)
 
         # Save trained agent
         current_dir = HydraConfig.get().runtime.output_dir
