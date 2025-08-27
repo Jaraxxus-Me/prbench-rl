@@ -14,7 +14,3 @@ class RandomAgent(BaseRLAgent[_O, _U]):
     def _get_action(self) -> _U:
         """Sample a random action from the action space."""
         return self.action_space.sample()
-
-    def train(self) -> None:
-        """Set the agent to training mode (no-op for random agent)."""
-        self._train_or_eval = "train"

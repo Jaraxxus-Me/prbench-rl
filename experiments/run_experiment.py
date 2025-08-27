@@ -2,12 +2,6 @@
 
 Examples:
     python experiments/run_experiment.py agent=random env=obstruction2d-o0 seed=0
-
-    python experiments/run_experiment.py -m agent=ppo env=obstruction2d-o0 \
-        seed='range(0,10)'
-
-    python experiments/run_experiment.py -m agent=ppo env=obstruction2d-o0 seed=0 \
-        train_steps=10000,50000,100000
 """
 
 import logging
@@ -15,7 +9,6 @@ import os
 from typing import Any
 
 import hydra
-import numpy as np
 import pandas as pd
 import prbench
 from gymnasium.core import Env
@@ -41,14 +34,7 @@ def _main(cfg: DictConfig) -> None:
     if cfg.mode == "train":
         # Training pipeline
         logging.info("Starting training...")
-        train_metrics = _run_training(
-            agent,
-            env,
-            cfg.train_steps,
-            cfg.eval_frequency,
-            cfg.eval_episodes,
-            cfg.max_eval_steps,
-        )
+        train_metrics = agent.train(env)
 
         # Save trained agent
         current_dir = HydraConfig.get().runtime.output_dir
@@ -89,71 +75,6 @@ def _main(cfg: DictConfig) -> None:
     with open(config_path, "w", encoding="utf-8") as f:
         OmegaConf.save(cfg, f)
     logging.info(f"Saved config to {config_path}")
-
-
-def _run_training(
-    agent: BaseRLAgent,
-    env: Env,
-    total_train_steps: int,
-    eval_frequency: int,
-    eval_episodes: int,
-    max_eval_steps: int,
-) -> list[dict[str, Any]]:
-    """Run the training loop."""
-    agent.train()
-    training_metrics = []
-
-    step = 0
-    episode = 0
-
-    while step < total_train_steps:
-        episode += 1
-        obs, info = env.reset()
-        agent.reset(obs, info)
-        episode_reward = 0.0
-        episode_steps = 0
-
-        for _ in range(max_eval_steps):
-            action = agent.step()
-            next_obs, reward, done, truncated, info = env.step(action)
-            agent.update(next_obs, float(reward), done or truncated, info)
-
-            episode_reward += float(reward)
-            episode_steps += 1
-            step += 1
-
-            if done or truncated or step >= total_train_steps:
-                break
-
-        # Log training progress
-        logging.info(f"Episode {episode}, Steps {step}, Reward {episode_reward:.2f}")
-
-        # Periodic evaluation
-        if step % eval_frequency == 0:
-            agent.eval()
-            eval_metrics = _run_evaluation(
-                agent, env, eval_episodes, max_eval_steps, step
-            )
-            avg_reward = np.mean([m["episode_reward"] for m in eval_metrics])
-            success_rate = np.mean([m["success"] for m in eval_metrics])
-
-            training_metrics.append(
-                {
-                    "step": step,
-                    "episode": episode,
-                    "eval_avg_reward": avg_reward,
-                    "eval_success_rate": success_rate,
-                    "train_episode_reward": episode_reward,
-                }
-            )
-
-            logging.info(
-                f"Eval at step {step}: avg_reward={avg_reward:.2f}, "
-                f"success_rate={success_rate:.2f}"
-            )
-            agent.train()
-
-    return training_metrics
 
 
 def _run_evaluation(
