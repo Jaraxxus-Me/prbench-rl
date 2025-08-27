@@ -58,7 +58,6 @@ def _main(
     combined_df = pd.DataFrame(combined_data)
 
     # Aggregate.
-    # I hate pandas, why isn't this easy...
     group_cols = sorted(set(config_columns) - {"seed"})
     keep_cols = [c for c in combined_df.columns if c not in ["seed", "eval_episode"]]
     aggregated_df = combined_df.groupby(group_cols).mean().reset_index()[keep_cols]

@@ -12,7 +12,7 @@ Examples:
 
 import logging
 import os
-from typing import Any, Dict
+from typing import Any
 
 import hydra
 import numpy as np
@@ -98,7 +98,7 @@ def _run_training(
     eval_frequency: int,
     eval_episodes: int,
     max_eval_steps: int,
-) -> list[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Run the training loop."""
     agent.train()
     training_metrics = []
@@ -162,7 +162,7 @@ def _run_evaluation(
     num_episodes: int,
     max_steps: int,
     seed: int | None = None,
-) -> list[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Run evaluation episodes."""
     eval_metrics = []
 

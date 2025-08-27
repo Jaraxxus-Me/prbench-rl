@@ -3,8 +3,8 @@
 from gymnasium.core import Env
 from omegaconf import DictConfig
 
-from .agent import BaseRLAgent
-from .random_agent import RandomAgent
+from prbench_rl.agent import BaseRLAgent
+from prbench_rl.random_agent import RandomAgent
 
 __all__ = ["create_rl_agents"]
 

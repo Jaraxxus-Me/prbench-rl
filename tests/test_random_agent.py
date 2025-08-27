@@ -36,7 +36,7 @@ def test_random_agent_with_prbench_environment():
         obs, reward, terminated, truncated, info = env.step(action)
 
         # Test transition learning (should not raise errors)
-        agent._learn_from_transition(
+        agent._learn_from_transition(  # pylint: disable=protected-access
             obs=obs,
             act=action,
             next_obs=obs,
