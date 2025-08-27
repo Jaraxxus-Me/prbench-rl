@@ -37,6 +37,7 @@ prbench_bilevel_planning = ["py.typed"]
 [tool.black]
 line-length = 88
 target-version = ["py311"]
+exclude = "(third-party|\\.venv)"
 
 [tool.isort]
 py_version = 311
@@ -49,6 +50,7 @@ split_on_trailing_comma = true
 line-length = 88
 wrap-summaries = 88
 wrap-descriptions = 88
+exclude = ["venv", ".venv", "third-party"]
 
 [tool.mypy]
 strict_equality = true
