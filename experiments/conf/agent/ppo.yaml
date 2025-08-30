@@ -28,3 +28,7 @@ actor_std_init: 0.01
 # Training settings
 torch_deterministic: true
 cuda: true
+
+# Logging settings
+tf_log: true
+tf_log_dir: "runs"

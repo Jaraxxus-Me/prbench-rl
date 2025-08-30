@@ -1,5 +1,7 @@
 """PPO agent implementation for PRBench environments."""
 
+import os
+import time
 from typing import Any, TypeVar
 
 import numpy as np
@@ -10,6 +12,11 @@ from gymnasium import spaces
 from gymnasium.core import Env
 from omegaconf import DictConfig
 from torch.distributions.normal import Normal
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None
 
 from prbench_rl.agent import BaseRLAgent
 
@@ -27,11 +34,22 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class PPONetwork(nn.Module):
     """PPO actor-critic network."""
 
-    def __init__(self, observation_space: spaces.Space, action_space: spaces.Space, hidden_size: int = 64) -> None:
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        hidden_size: int = 64,
+    ) -> None:
         super().__init__()
         obs_dim = np.array(observation_space.shape).prod()
         action_dim = np.prod(action_space.shape)
-        
+
+        # Store action space bounds for bounded actions
+        self.action_low = torch.tensor(action_space.low, dtype=torch.float32)
+        self.action_high = torch.tensor(action_space.high, dtype=torch.float32)
+        self.action_scale = (self.action_high - self.action_low) / 2.0
+        self.action_bias = (self.action_high + self.action_low) / 2.0
+
         # Critic network
         self.critic = nn.Sequential(
             layer_init(nn.Linear(obs_dim, hidden_size)),
@@ -40,8 +58,8 @@ class PPONetwork(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(hidden_size, 1), std=1.0),
         )
-        
-        # Actor network
+
+        # Actor network (outputs raw values that will be scaled)
         self.actor_mean = nn.Sequential(
             layer_init(nn.Linear(obs_dim, hidden_size)),
             nn.Tanh(),
@@ -49,25 +67,47 @@ class PPONetwork(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(hidden_size, action_dim), std=0.01),
         )
-        
-        # Learnable log standard deviation
+
+        # Learnable log standard deviation (in scaled space)
         self.actor_logstd = nn.Parameter(torch.zeros(1, action_dim))
 
     def get_value(self, x: torch.Tensor) -> torch.Tensor:
         """Get state value estimate."""
         return self.critic(x)
 
-    def get_action_and_value(self, x: torch.Tensor, action: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def get_action_and_value(
+        self, x: torch.Tensor, action: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get action and value, with optional action for evaluation."""
-        action_mean = self.actor_mean(x)
-        action_logstd = self.actor_logstd.expand_as(action_mean)
+        # Get raw action mean in [-1, 1] range
+        raw_action_mean = torch.tanh(self.actor_mean(x))
+        action_logstd = self.actor_logstd.expand_as(raw_action_mean)
         action_std = torch.exp(action_logstd)
-        probs = Normal(action_mean, action_std)
-        
+
+        # Scale to actual action space
+        action_low = self.action_low.to(x.device)
+        action_high = self.action_high.to(x.device)
+        action_scale = self.action_scale.to(x.device)
+        action_bias = self.action_bias.to(x.device)
+
+        # Scale the mean to action space bounds
+        scaled_action_mean = raw_action_mean * action_scale + action_bias
+        # Scale the std to action space
+        scaled_action_std = action_std * action_scale
+
+        probs = Normal(scaled_action_mean, scaled_action_std)
+
         if action is None:
             action = probs.sample()
-        
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+            # Clamp to action bounds for safety
+            action = torch.clamp(action, action_low, action_high)
+
+        return (
+            action,
+            probs.log_prob(action).sum(1),
+            probs.entropy().sum(1),
+            self.critic(x),
+        )
 
 
 class PPOAgent(BaseRLAgent[_O, _U]):
@@ -81,42 +121,64 @@ class PPOAgent(BaseRLAgent[_O, _U]):
         cfg: DictConfig,
     ) -> None:
         super().__init__(observation_space, action_space, seed, cfg)
-        
+
         # Device setup
-        self.device = torch.device("cuda" if torch.cuda.is_available() and cfg.cuda else "cpu")
-        
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() and cfg.cuda else "cpu"
+        )
+
         # Set random seeds
         torch.manual_seed(seed)
         if cfg.torch_deterministic:
             torch.backends.cudnn.deterministic = False
-        
+
         # Create network
-        self.network = PPONetwork(observation_space, action_space, cfg.hidden_size).to(self.device)
-        self.optimizer = optim.Adam(self.network.parameters(), lr=cfg.learning_rate, eps=1e-5)
-        
+        self.network = PPONetwork(observation_space, action_space, cfg.hidden_size).to(
+            self.device
+        )
+        self.optimizer = optim.Adam(
+            self.network.parameters(), lr=cfg.learning_rate, eps=1e-5
+        )
+
         # Training storage
         self.reset_storage()
-        
+
         # Current state
         self._current_obs = None
         self._current_action = None
         self._current_logprob = None
         self._current_value = None
 
+        # Tensorboard logging
+        self.writer = None
+        if cfg.get("tf_log", False):
+            if SummaryWriter is None:
+                print("Warning: tensorboard not available, skipping logging")
+            else:
+                tf_log_dir = cfg.get("tf_log_dir", "runs")
+                run_name = f"ppo__{int(time.time())}__{seed}"
+                self.writer = SummaryWriter(os.path.join(tf_log_dir, run_name))
+
     def reset_storage(self) -> None:
         """Reset trajectory storage buffers."""
         cfg = self.cfg
         self.batch_size = int(cfg.num_envs * cfg.num_steps)
         self.minibatch_size = int(self.batch_size // cfg.num_minibatches)
-        
+
         # Storage tensors
-        self.obs_buffer = torch.zeros((cfg.num_steps, cfg.num_envs) + self.observation_space.shape).to(self.device)
-        self.actions_buffer = torch.zeros((cfg.num_steps, cfg.num_envs) + self.action_space.shape).to(self.device)
-        self.logprobs_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(self.device)
+        self.obs_buffer = torch.zeros(
+            (cfg.num_steps, cfg.num_envs) + self.observation_space.shape
+        ).to(self.device)
+        self.actions_buffer = torch.zeros(
+            (cfg.num_steps, cfg.num_envs) + self.action_space.shape
+        ).to(self.device)
+        self.logprobs_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(
+            self.device
+        )
         self.rewards_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(self.device)
         self.dones_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(self.device)
         self.values_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(self.device)
-        
+
         # Reset counters
         self.step_count = 0
         self.global_step = 0
@@ -125,16 +187,20 @@ class PPOAgent(BaseRLAgent[_O, _U]):
         """Get action from policy."""
         if self._current_obs is None:
             return self.action_space.sample()
-            
-        obs_tensor = torch.tensor(self._current_obs, dtype=torch.float32).unsqueeze(0).to(self.device)
-        
+
+        obs_tensor = (
+            torch.tensor(self._current_obs, dtype=torch.float32)
+            .unsqueeze(0)
+            .to(self.device)
+        )
+
         with torch.no_grad():
             action, logprob, _, value = self.network.get_action_and_value(obs_tensor)
-            
+
         self._current_action = action.cpu().numpy()[0]
         self._current_logprob = logprob.cpu().numpy()[0]
         self._current_value = value.cpu().numpy()[0]
-        
+
         return self._current_action
 
     def reset(self, obs: _O, info: dict[str, Any]) -> None:
@@ -145,56 +211,64 @@ class PPOAgent(BaseRLAgent[_O, _U]):
     def update(self, obs: _O, reward: float, done: bool, info: dict[str, Any]) -> None:
         """Update agent with transition data."""
         super().update(obs, reward, done, info)
-        
+
         # Store the transition in training mode
         if self._train_or_eval == "train" and self.step_count < self.cfg.num_steps:
             self._store_transition(obs, reward, done)
-            
+
         self._current_obs = np.array(obs)
 
     def _store_transition(self, obs: _O, reward: float, done: bool) -> None:
         """Store transition data for training."""
         step = self.step_count
-        
+
         # Store previous step's data
         if self._last_observation is not None and self._current_action is not None:
-            self.obs_buffer[step, 0] = torch.tensor(self._last_observation, dtype=torch.float32)
-            self.actions_buffer[step, 0] = torch.tensor(self._current_action, dtype=torch.float32)
-            self.logprobs_buffer[step, 0] = self._current_logprob
-            self.rewards_buffer[step, 0] = reward
-            self.dones_buffer[step, 0] = done
-            self.values_buffer[step, 0] = self._current_value
-            
+            self.obs_buffer[step, 0] = torch.tensor(
+                self._last_observation, dtype=torch.float32
+            )
+            self.actions_buffer[step, 0] = torch.tensor(
+                self._current_action, dtype=torch.float32
+            )
+            self.logprobs_buffer[step, 0] = torch.tensor(
+                self._current_logprob, dtype=torch.float32
+            )
+            self.rewards_buffer[step, 0] = torch.tensor(reward, dtype=torch.float32)
+            self.dones_buffer[step, 0] = torch.tensor(done, dtype=torch.float32)
+            self.values_buffer[step, 0] = torch.tensor(
+                self._current_value, dtype=torch.float32
+            )
+
             self.step_count += 1
 
     def train_with_env(self, env: Env) -> list[dict[str, Any]]:
         """Train the PPO agent with environment interaction."""
         self.train()
         training_metrics = []
-        
+
         num_iterations = self.cfg.total_timesteps // self.batch_size
-        
+
         for iteration in range(1, num_iterations + 1):
             # Collect rollout
             episode_metrics = self._collect_rollout(env)
             training_metrics.extend(episode_metrics)
-            
+
             # Update policy
             if self.step_count >= self.cfg.num_steps:
                 update_metrics = self._update_policy()
-                
+
                 # Add update metrics to latest episode if available
                 if training_metrics and update_metrics:
                     training_metrics[-1].update(update_metrics)
-                
+
                 self.reset_storage()
-            
+
             # Learning rate annealing
-            if self.cfg.anneal_lr:
+            if self.cfg.get("anneal_lr", False):
                 frac = 1.0 - (iteration - 1.0) / num_iterations
                 lrnow = frac * self.cfg.learning_rate
                 self.optimizer.param_groups[0]["lr"] = lrnow
-        
+
         return training_metrics
 
     def _collect_rollout(self, env: Env) -> list[dict[str, Any]]:
@@ -202,50 +276,64 @@ class PPOAgent(BaseRLAgent[_O, _U]):
         episode_metrics = []
         initial_obs, info = env.reset()
         self.reset(initial_obs, info)
-        
+
         episode_reward = 0.0
         episode_steps = 0
-        
+
         while self.step_count < self.cfg.num_steps:
             action = self.step()
             next_obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
-            
+
             self.update(next_obs, reward, done, info)
-            
+
             episode_reward += reward
             episode_steps += 1
             self.global_step += 1
-            
+
             if done:
-                episode_metrics.append({
+                episode_data = {
                     "episode_reward": episode_reward,
                     "episode_steps": episode_steps,
                     "global_step": self.global_step,
-                })
-                
+                }
+                episode_metrics.append(episode_data)
+
+                # Log to tensorboard
+                if self.writer:
+                    self.writer.add_scalar(
+                        "charts/episodic_return", episode_reward, self.global_step
+                    )
+                    self.writer.add_scalar(
+                        "charts/episodic_length", episode_steps, self.global_step
+                    )
+
                 episode_reward = 0.0
                 episode_steps = 0
-                
+
                 if self.step_count < self.cfg.num_steps:
                     obs, info = env.reset()
                     self.reset(obs, info)
-        
+
         return episode_metrics
 
     def _update_policy(self) -> dict[str, Any]:
         """Update the policy using PPO."""
         cfg = self.cfg
-        
+
         # Bootstrap value if not done (for the last step)
         with torch.no_grad():
-            next_obs = torch.tensor(self._current_obs, dtype=torch.float32).unsqueeze(0).to(self.device)
+            next_obs = (
+                torch.tensor(self._current_obs, dtype=torch.float32)
+                .unsqueeze(0)
+                .to(self.device)
+            )
             next_value = self.network.get_value(next_obs).reshape(1, -1)
-            
+
             # Compute advantages using GAE
             advantages = torch.zeros_like(self.rewards_buffer).to(self.device)
             lastgaelam = 0
-            
+
             for t in reversed(range(cfg.num_steps)):
                 if t == cfg.num_steps - 1:
                     nextnonterminal = 1.0 - self.dones_buffer[t]
@@ -253,16 +341,16 @@ class PPOAgent(BaseRLAgent[_O, _U]):
                 else:
                     nextnonterminal = 1.0 - self.dones_buffer[t + 1]
                     nextvalues = self.values_buffer[t + 1]
-                    
+
                 delta = (
-                    self.rewards_buffer[t] + 
-                    cfg.gamma * nextvalues * nextnonterminal - 
-                    self.values_buffer[t]
+                    self.rewards_buffer[t]
+                    + cfg.gamma * nextvalues * nextnonterminal
+                    - self.values_buffer[t]
                 )
                 advantages[t] = lastgaelam = (
                     delta + cfg.gamma * cfg.gae_lambda * nextnonterminal * lastgaelam
                 )
-            
+
             returns = advantages + self.values_buffer
 
         # Flatten batch
@@ -276,10 +364,10 @@ class PPOAgent(BaseRLAgent[_O, _U]):
         # Optimize policy for multiple epochs
         b_inds = np.arange(self.batch_size)
         clipfracs = []
-        
+
         for _ in range(cfg.update_epochs):
             np.random.shuffle(b_inds)
-            
+
             for start in range(0, self.batch_size, self.minibatch_size):
                 end = start + self.minibatch_size
                 mb_inds = b_inds[start:end]
@@ -294,15 +382,21 @@ class PPOAgent(BaseRLAgent[_O, _U]):
                     # KL divergence approximation
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [((ratio - 1.0).abs() > cfg.clip_coef).float().mean().item()]
+                    clipfracs += [
+                        ((ratio - 1.0).abs() > cfg.clip_coef).float().mean().item()
+                    ]
 
                 mb_advantages = b_advantages[mb_inds]
                 if cfg.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (
+                        mb_advantages.std() + 1e-8
+                    )
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - cfg.clip_coef, 1 + cfg.clip_coef)
+                pg_loss2 = -mb_advantages * torch.clamp(
+                    ratio, 1 - cfg.clip_coef, 1 + cfg.clip_coef
+                )
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Value loss
@@ -310,7 +404,9 @@ class PPOAgent(BaseRLAgent[_O, _U]):
                 if cfg.clip_vloss:
                     v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
                     v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds], -cfg.clip_coef, cfg.clip_coef,
+                        newvalue - b_values[mb_inds],
+                        -cfg.clip_coef,
+                        cfg.clip_coef,
                     )
                     v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
@@ -334,7 +430,7 @@ class PPOAgent(BaseRLAgent[_O, _U]):
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        return {
+        metrics = {
             "policy_loss": pg_loss.item(),
             "value_loss": v_loss.item(),
             "entropy_loss": entropy_loss.item(),
@@ -345,15 +441,54 @@ class PPOAgent(BaseRLAgent[_O, _U]):
             "learning_rate": self.optimizer.param_groups[0]["lr"],
         }
 
+        # Log to tensorboard
+        if self.writer:
+            self.writer.add_scalar(
+                "charts/learning_rate", metrics["learning_rate"], self.global_step
+            )
+            self.writer.add_scalar(
+                "losses/value_loss", metrics["value_loss"], self.global_step
+            )
+            self.writer.add_scalar(
+                "losses/policy_loss", metrics["policy_loss"], self.global_step
+            )
+            self.writer.add_scalar(
+                "losses/entropy", metrics["entropy_loss"], self.global_step
+            )
+            self.writer.add_scalar(
+                "losses/old_approx_kl", metrics["old_approx_kl"], self.global_step
+            )
+            self.writer.add_scalar(
+                "losses/approx_kl", metrics["approx_kl"], self.global_step
+            )
+            self.writer.add_scalar(
+                "losses/clipfrac", metrics["clipfrac"], self.global_step
+            )
+            self.writer.add_scalar(
+                "losses/explained_variance",
+                metrics["explained_variance"],
+                self.global_step,
+            )
+
+        return metrics
+
     def save(self, filepath: str) -> None:
         """Save agent parameters."""
-        torch.save({
-            'network_state_dict': self.network.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-        }, filepath)
+        torch.save(
+            {
+                "network_state_dict": self.network.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+            },
+            filepath,
+        )
 
     def load(self, filepath: str) -> None:
         """Load agent parameters."""
         checkpoint = torch.load(filepath, map_location=self.device)
-        self.network.load_state_dict(checkpoint['network_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.network.load_state_dict(checkpoint["network_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    def close(self) -> None:
+        """Close the tensorboard writer."""
+        if self.writer:
+            self.writer.close()
