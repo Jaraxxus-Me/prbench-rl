@@ -33,7 +33,8 @@ jobs:
     - name: Install the project
       run: |
         uv sync --all-extras --dev
-        uv pip install third-party/prbench
+        uv pip install third-party/prbench-models
+        uv pip install third-party/prbench-models/third-party/prbench
     - name: Lint
       run: |
         uv run pytest . --pylint -m pylint --pylint-rcfile=.pylintrc
@@ -56,7 +57,8 @@ jobs:
     - name: Install the project
       run: |
         uv sync --all-extras --dev
-        uv pip install third-party/prbench
+        uv pip install third-party/prbench-models
+        uv pip install third-party/prbench-models/third-party/prbench
     - name: Mypy
       run: |
         uv run mypy .
@@ -83,7 +85,8 @@ jobs:
     - name: Install the project
       run: |
         uv sync --all-extras --dev
-        uv pip install third-party/prbench
+        uv pip install third-party/prbench-models
+        uv pip install third-party/prbench-models/third-party/prbench
     - name: Pytest
       run: |
        uv run pytest tests/

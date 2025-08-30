@@ -6,5 +6,5 @@ import importlib
 def test_submodule_imports():
     """Dynamically test that submodules can be imported."""
 
-    for module in ["prbench"]:
+    for module in ["prbench", "prbench_models"]:
         importlib.import_module(module)

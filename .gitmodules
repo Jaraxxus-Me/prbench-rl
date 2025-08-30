@@ -1,3 +1,6 @@
 [submodule "third-party/cleanrl"]
 	path = third-party/cleanrl
 	url = https://github.com/vwxyzjn/cleanrl.git
+[submodule "third-party/prbench-models"]
+	path = third-party/prbench-models
+	url = https://github.com/Princeton-Robot-Planning-and-Learning/prbench-models.git
