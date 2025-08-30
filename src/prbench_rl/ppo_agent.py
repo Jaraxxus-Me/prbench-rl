@@ -15,8 +15,10 @@ from torch.distributions.normal import Normal
 
 try:
     from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
 except ImportError:
-    SummaryWriter = None
+    SummaryWriter = None  # type: ignore
+    TENSORBOARD_AVAILABLE = False
 
 from prbench_rl.agent import BaseRLAgent
 
@@ -24,7 +26,7 @@ _O = TypeVar("_O")
 _U = TypeVar("_U")
 
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+def layer_init(layer: nn.Linear, std: float = float(np.sqrt(2)), bias_const: float = 0.0) -> nn.Linear:
     """Initialize layer weights with orthogonal initialization."""
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
@@ -36,13 +38,16 @@ class PPONetwork(nn.Module):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
-        action_space: spaces.Space,
+        observation_space: spaces.Box,
+        action_space: spaces.Box,
         hidden_size: int = 64,
     ) -> None:
         super().__init__()
-        obs_dim = np.array(observation_space.shape).prod()
-        action_dim = np.prod(action_space.shape)
+        obs_shape = observation_space.shape
+        action_shape = action_space.shape
+        assert obs_shape is not None and action_shape is not None
+        obs_dim = int(np.array(obs_shape).prod())
+        action_dim = int(np.prod(action_shape))
 
         # Store action space bounds for bounded actions
         self.action_low = torch.tensor(action_space.low, dtype=torch.float32)
@@ -69,7 +74,7 @@ class PPONetwork(nn.Module):
         )
 
         # Learnable log standard deviation (in scaled space)
-        self.actor_logstd = nn.Parameter(torch.zeros(1, action_dim))
+        self.actor_logstd = nn.Parameter(torch.zeros((1, action_dim)))
 
     def get_value(self, x: torch.Tensor) -> torch.Tensor:
         """Get state value estimate."""
@@ -98,14 +103,14 @@ class PPONetwork(nn.Module):
         probs = Normal(scaled_action_mean, scaled_action_std)
 
         if action is None:
-            action = probs.sample()
+            action = probs.sample()  # type: ignore
             # Clamp to action bounds for safety
             action = torch.clamp(action, action_low, action_high)
 
         return (
             action,
-            probs.log_prob(action).sum(1),
-            probs.entropy().sum(1),
+            probs.log_prob(action).sum(1),  # type: ignore
+            probs.entropy().sum(1),  # type: ignore
             self.critic(x),
         )
 
@@ -115,8 +120,8 @@ class PPOAgent(BaseRLAgent[_O, _U]):
 
     def __init__(
         self,
-        observation_space: spaces.Space,
-        action_space: spaces.Space,
+        observation_space: spaces.Box,
+        action_space: spaces.Box,
         seed: int,
         cfg: DictConfig,
     ) -> None:
@@ -152,12 +157,12 @@ class PPOAgent(BaseRLAgent[_O, _U]):
         # Tensorboard logging
         self.writer = None
         if cfg.get("tf_log", False):
-            if SummaryWriter is None:
+            if not TENSORBOARD_AVAILABLE or SummaryWriter is None:
                 print("Warning: tensorboard not available, skipping logging")
             else:
                 tf_log_dir = cfg.get("tf_log_dir", "runs")
                 run_name = f"ppo__{int(time.time())}__{seed}"
-                self.writer = SummaryWriter(os.path.join(tf_log_dir, run_name))
+                self.writer = SummaryWriter(os.path.join(tf_log_dir, run_name))  # type: ignore
 
     def reset_storage(self) -> None:
         """Reset trajectory storage buffers."""
@@ -166,11 +171,14 @@ class PPOAgent(BaseRLAgent[_O, _U]):
         self.minibatch_size = int(self.batch_size // cfg.num_minibatches)
 
         # Storage tensors
+        obs_shape = self.observation_space.shape
+        action_shape = self.action_space.shape
+        assert obs_shape is not None and action_shape is not None
         self.obs_buffer = torch.zeros(
-            (cfg.num_steps, cfg.num_envs) + self.observation_space.shape
+            (cfg.num_steps, cfg.num_envs) + obs_shape
         ).to(self.device)
         self.actions_buffer = torch.zeros(
-            (cfg.num_steps, cfg.num_envs) + self.action_space.shape
+            (cfg.num_steps, cfg.num_envs) + action_shape
         ).to(self.device)
         self.logprobs_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(
             self.device
@@ -186,7 +194,7 @@ class PPOAgent(BaseRLAgent[_O, _U]):
     def _get_action(self) -> _U:
         """Get action from policy."""
         if self._current_obs is None:
-            return self.action_space.sample()
+            return self.action_space.sample()  # type: ignore
 
         obs_tensor = (
             torch.tensor(self._current_obs, dtype=torch.float32)
@@ -198,15 +206,15 @@ class PPOAgent(BaseRLAgent[_O, _U]):
             action, logprob, _, value = self.network.get_action_and_value(obs_tensor)
 
         self._current_action = action.cpu().numpy()[0]
-        self._current_logprob = logprob.cpu().numpy()[0]
+        self._current_logprob = logprob.cpu().numpy()[0] 
         self._current_value = value.cpu().numpy()[0]
 
-        return self._current_action
+        return self._current_action  # type: ignore
 
     def reset(self, obs: _O, info: dict[str, Any]) -> None:
         """Start a new episode."""
         super().reset(obs, info)
-        self._current_obs = np.array(obs)
+        self._current_obs = np.array(obs)  # type: ignore
 
     def update(self, obs: _O, reward: float, done: bool, info: dict[str, Any]) -> None:
         """Update agent with transition data."""
@@ -216,7 +224,7 @@ class PPOAgent(BaseRLAgent[_O, _U]):
         if self._train_or_eval == "train" and self.step_count < self.cfg.num_steps:
             self._store_transition(obs, reward, done)
 
-        self._current_obs = np.array(obs)
+        self._current_obs = np.array(obs)  # type: ignore
 
     def _store_transition(self, obs: _O, reward: float, done: bool) -> None:
         """Store transition data for training."""
@@ -285,9 +293,9 @@ class PPOAgent(BaseRLAgent[_O, _U]):
             next_obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
 
-            self.update(next_obs, reward, done, info)
+            self.update(next_obs, float(reward), done, info)
 
-            episode_reward += reward
+            episode_reward += float(reward)
             episode_steps += 1
             self.global_step += 1
 
@@ -301,10 +309,10 @@ class PPOAgent(BaseRLAgent[_O, _U]):
 
                 # Log to tensorboard
                 if self.writer:
-                    self.writer.add_scalar(
+                    self.writer.add_scalar(  # type: ignore
                         "charts/episodic_return", episode_reward, self.global_step
                     )
-                    self.writer.add_scalar(
+                    self.writer.add_scalar(  # type: ignore
                         "charts/episodic_length", episode_steps, self.global_step
                     )
 
@@ -354,9 +362,12 @@ class PPOAgent(BaseRLAgent[_O, _U]):
             returns = advantages + self.values_buffer
 
         # Flatten batch
-        b_obs = self.obs_buffer.reshape((-1,) + self.observation_space.shape)
+        obs_shape = self.observation_space.shape
+        action_shape = self.action_space.shape
+        assert obs_shape is not None and action_shape is not None
+        b_obs = self.obs_buffer.reshape((-1,) + obs_shape)
         b_logprobs = self.logprobs_buffer.reshape(-1)
-        b_actions = self.actions_buffer.reshape((-1,) + self.action_space.shape)
+        b_actions = self.actions_buffer.reshape((-1,) + action_shape)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = self.values_buffer.reshape(-1)
@@ -443,28 +454,28 @@ class PPOAgent(BaseRLAgent[_O, _U]):
 
         # Log to tensorboard
         if self.writer:
-            self.writer.add_scalar(
+            self.writer.add_scalar(  # type: ignore
                 "charts/learning_rate", metrics["learning_rate"], self.global_step
             )
-            self.writer.add_scalar(
+            self.writer.add_scalar(  # type: ignore
                 "losses/value_loss", metrics["value_loss"], self.global_step
             )
-            self.writer.add_scalar(
+            self.writer.add_scalar(  # type: ignore
                 "losses/policy_loss", metrics["policy_loss"], self.global_step
             )
-            self.writer.add_scalar(
+            self.writer.add_scalar(  # type: ignore
                 "losses/entropy", metrics["entropy_loss"], self.global_step
             )
-            self.writer.add_scalar(
+            self.writer.add_scalar(  # type: ignore
                 "losses/old_approx_kl", metrics["old_approx_kl"], self.global_step
             )
-            self.writer.add_scalar(
+            self.writer.add_scalar(  # type: ignore
                 "losses/approx_kl", metrics["approx_kl"], self.global_step
             )
-            self.writer.add_scalar(
+            self.writer.add_scalar(  # type: ignore
                 "losses/clipfrac", metrics["clipfrac"], self.global_step
             )
-            self.writer.add_scalar(
+            self.writer.add_scalar(  # type: ignore
                 "losses/explained_variance",
                 metrics["explained_variance"],
                 self.global_step,
@@ -491,4 +502,4 @@ class PPOAgent(BaseRLAgent[_O, _U]):
     def close(self) -> None:
         """Close the tensorboard writer."""
         if self.writer:
-            self.writer.close()
+            self.writer.close()  # type: ignore
