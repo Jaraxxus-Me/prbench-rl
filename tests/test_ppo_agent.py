@@ -1,11 +1,16 @@
 """Tests for the PPO agent."""
 
 import numpy as np
+import imageio.v2 as iio
 import prbench
 import torch
+import gymnasium
 from gymnasium import spaces
 from omegaconf import DictConfig
+from gymnasium.wrappers import RecordVideo
 
+from conftest import MAKE_VIDEOS
+from prbench.envs.geom2d.stickbutton2d import StickButton2DEnv
 from prbench_rl.ppo_agent import PPOAgent
 
 
@@ -84,25 +89,36 @@ def test_ppo_agent_with_prbench_environment():
 def test_ppo_agent_training_with_fixed_environment():
     """Test PPO agent can overfit on fixed environment setup."""
     prbench.register_all_environments()
-    env = prbench.make("prbench/StickButton2D-b1-v0")
+    env = prbench.make("prbench/StickButton2D-b1-v0", render_mode="rgb_array" if MAKE_VIDEOS else None)
 
     # Create a custom environment wrapper that fixes positions
-    class FixedPositionWrapper:
-        def __init__(self, env):
+    class FixedPositionWrapper(gymnasium.Env):
+        def __init__(self, env: StickButton2DEnv):
+            super().__init__()
             self.env = env
             self.observation_space = env.observation_space
             self.action_space = env.action_space
+            self.render_mode = env.render_mode
+            obs0, _ = self.env.reset(seed=123)
+            state0 = self.env.observation_space.devectorize(obs0)
+            obj_name_to_obj = {o.name: o for o in list(state0.data.keys())}
+            robot = obj_name_to_obj["robot"]
+            button0 = obj_name_to_obj["button0"]
+
+            state1 = state0.copy()
+            state1.set(robot, "x", 1.5)
+            state1.set(robot, "y", 1.0)
+            state1.set(button0, "y", 1.0)
+            state1.set(button0, "x", 2.0)
+            self.reset_options = {"init_state": state1}
+            # Debug
+            # _, _ = env.reset(seed=123, options=self.reset_options)
+            # img = env.render()
+            # iio.imwrite("debug/unit_test_fixed_env_init.png", img)
 
         def reset(self, seed=None, options=None):
-            obs, info = self.env.reset(seed=seed, options=options)
-            # Fix robot position to (1.0, 1.0) and button position to (1.5, 1.0)
-            # Assuming observation format includes robot and button positions
-            if hasattr(self.env.unwrapped, "_robot_pos"):
-                self.env.unwrapped._robot_pos = np.array([1.0, 1.0])
-            if hasattr(self.env.unwrapped, "_button_pos"):
-                self.env.unwrapped._button_pos = np.array([1.5, 1.0])
-            # Update observation to reflect fixed positions
-            obs = self.env._get_obs() if hasattr(self.env, "_get_obs") else obs
+            del options  # Ignore external options
+            obs, info = self.env.reset(seed=seed, options=self.reset_options)
             return obs, info
 
         def step(self, action):
@@ -111,8 +127,14 @@ def test_ppo_agent_training_with_fixed_environment():
         def close(self):
             return self.env.close()
 
+        def render(self):
+            return self.env.render()
+
     # Wrap environment with fixed positions
     fixed_env = FixedPositionWrapper(env)
+
+    if MAKE_VIDEOS:
+        fixed_env = RecordVideo(fixed_env, "unit_test_videos")
 
     # Create PPO agent with small config for quick overfitting
     cfg = DictConfig(

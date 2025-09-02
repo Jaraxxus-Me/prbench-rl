@@ -214,7 +214,7 @@ class PPOAgent(BaseRLAgent[_O, _U]):
     def reset(self, obs: _O, info: dict[str, Any]) -> None:
         """Start a new episode."""
         super().reset(obs, info)
-        self._current_obs = np.array(obs)  # type: ignore
+        self._current_obs = np.array(self._last_observation)
 
     def update(self, obs: _O, reward: float, done: bool, info: dict[str, Any]) -> None:
         """Update agent with transition data."""
