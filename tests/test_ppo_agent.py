@@ -114,6 +114,8 @@ def test_ppo_agent_training_with_fixed_environment():
             state1.set(button0, "y", 1.0)
             state1.set(button0, "x", 2.0)
             self.reset_options = {"init_state": state1}
+            self.num_env_steps = 0
+            self.r = 0.0
             # Debug
             # _, _ = env.reset(seed=123, options=self.reset_options)
             # img = env.render()
@@ -121,11 +123,26 @@ def test_ppo_agent_training_with_fixed_environment():
 
         def reset(self, seed=None, options=None):
             del options  # Ignore external options
+            self.num_env_steps = 0
+            self.r = 0.0
             obs, info = self.env.reset(seed=seed, options=self.reset_options)
             return obs, info
 
         def step(self, action):
-            return self.env.step(action)
+            self.num_env_steps += 1
+            obs, reward, terminated, truncated, info = self.env.step(action)
+            self.r += reward
+            if terminated or truncated:
+                info["final_info"] = [
+                    {
+                        "episode": {
+                            "r": self.r,
+                            "l": self.num_env_steps - 1,
+                        }
+                    }
+                ]
+                obs, _ = self.reset()
+            return obs, reward, terminated, truncated, info
 
         def close(self):
             return self.env.close()
