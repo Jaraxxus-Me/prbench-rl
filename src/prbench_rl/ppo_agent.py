@@ -15,6 +15,7 @@ from torch.distributions.normal import Normal
 
 try:
     from torch.utils.tensorboard import SummaryWriter
+
     TENSORBOARD_AVAILABLE = True
 except ImportError:
     SummaryWriter = None  # type: ignore
@@ -26,7 +27,9 @@ _O = TypeVar("_O")
 _U = TypeVar("_U")
 
 
-def layer_init(layer: nn.Linear, std: float = float(np.sqrt(2)), bias_const: float = 0.0) -> nn.Linear:
+def layer_init(
+    layer: nn.Linear, std: float = float(np.sqrt(2)), bias_const: float = 0.0
+) -> nn.Linear:
     """Initialize layer weights with orthogonal initialization."""
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
@@ -145,15 +148,6 @@ class PPOAgent(BaseRLAgent[_O, _U]):
             self.network.parameters(), lr=cfg.learning_rate, eps=1e-5
         )
 
-        # Training storage
-        self.reset_storage()
-
-        # Current state
-        self._current_obs = None
-        self._current_action = None
-        self._current_logprob = None
-        self._current_value = None
-
         # Tensorboard logging
         self.writer = None
         if cfg.get("tf_log", False):
@@ -164,11 +158,12 @@ class PPOAgent(BaseRLAgent[_O, _U]):
                 run_name = f"ppo__{int(time.time())}__{seed}"
                 self.writer = SummaryWriter(os.path.join(tf_log_dir, run_name))  # type: ignore
 
-    def reset_storage(self) -> None:
+    def setup_storage(self) -> None:
         """Reset trajectory storage buffers."""
         cfg = self.cfg
         self.batch_size = int(cfg.num_envs * cfg.num_steps)
         self.minibatch_size = int(self.batch_size // cfg.num_minibatches)
+        self.global_train_step = 0
 
         # Storage tensors
         obs_shape = self.observation_space.shape
@@ -186,90 +181,107 @@ class PPOAgent(BaseRLAgent[_O, _U]):
         self.rewards_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(self.device)
         self.dones_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(self.device)
         self.values_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(self.device)
+        self.returns_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(self.device)
+        self.advantages_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(self.device)
 
-        # Reset counters
-        self.step_count = 0
-        self.global_step = 0
+    def _collect_rollout(self, env: Env) -> list[dict[str, Any]]:
+        """Collect a rollout of experience."""
+        episode_metrics = []
+        next_obs, _ = env.reset()
+        next_obs = torch.Tensor(next_obs).to(self.device)
+        next_done = torch.zeros(self.cfg.num_envs).to(self.device)
 
+        for step in range(0, self.cfg.num_steps):
+            self.global_train_step += self.cfg.num_envs
+            self.obs_buffer[step] = next_obs
+            self.dones_buffer[step] = next_done
+            with torch.no_grad():
+                if next_obs.dim() == 1:
+                    next_obs = next_obs.unsqueeze(0)
+                action, logprob, _, value = self.network.get_action_and_value(next_obs)
+                self.values_buffer[step] = value.flatten()
+            self.actions_buffer[step] = action
+            self.logprobs_buffer[step] = logprob
+
+            next_obs, reward, terminated, truncated, infos = env.step(action.squeeze().cpu().numpy())
+            if isinstance(terminated, bool):
+                assert self.cfg.num_envs == 1, "num_envs must be 1 if terminated is bool"
+                next_done = torch.zeros(self.cfg.num_envs).to(self.device)
+                next_done[0] = float(terminated or truncated)
+            self.rewards_buffer[step] = torch.tensor(reward).to(self.device)
+            next_obs, next_done = torch.Tensor(next_obs).to(self.device), \
+                torch.Tensor(next_done).to(self.device)
+
+            if "final_info" in infos:
+                for info in infos["final_info"]:
+                    if info and "episode" in info:
+                        print(f"global_step={self.global_train_step}, episodic_return={info['episode']['r']}")
+                        episode_metrics.append({
+                            "global_step": self.global_train_step,
+                            "episodic_return": info["episode"]["r"],
+                            "episodic_length": info["episode"]["l"],
+                        })
+                        # Log to tensorboard
+                        if self.writer:
+                            self.writer.add_scalar(  # type: ignore
+                                "charts/episodic_return", info["episode"]["r"], self.global_train_step
+                            )
+                            self.writer.add_scalar(  # type: ignore
+                                "charts/episodic_length", info["episode"]["l"], self.global_train_step
+                            )
+
+        # Bootstrap value if not done
+        with torch.no_grad():
+            next_value = self.network.get_value(next_obs).reshape(1, -1)
+            lastgaelam = 0
+            for t in reversed(range(self.cfg.num_steps)):
+                if t == self.cfg.num_steps - 1:
+                    nextnonterminal = 1.0 - next_done
+                    nextvalues = next_value
+                else:
+                    nextnonterminal = 1.0 - self.dones_buffer[t + 1]
+                    nextvalues = self.values_buffer[t + 1]
+                delta = self.rewards_buffer[t] + self.cfg.gamma * nextvalues * nextnonterminal - self.values_buffer[t]
+                self.advantages_buffer[t] = lastgaelam = delta + self.cfg.gamma * self.cfg.gae_lambda * nextnonterminal * lastgaelam
+            self.returns_buffer = self.advantages_buffer + self.values_buffer
+
+        return episode_metrics
+    
     def _get_action(self) -> _U:
         """Get action from policy."""
-        if self._current_obs is None:
-            return self.action_space.sample()  # type: ignore
+        if self._last_observation is None:
+            return self.action_space.sample()
 
         obs_tensor = (
-            torch.tensor(self._current_obs, dtype=torch.float32)
+            torch.tensor(self._last_observation, dtype=torch.float32)
             .unsqueeze(0)
             .to(self.device)
         )
 
         with torch.no_grad():
-            action, logprob, _, value = self.network.get_action_and_value(obs_tensor)
+            action, _, _, _ = self.network.get_action_and_value(obs_tensor)
 
-        self._current_action = action.cpu().numpy()[0]
-        self._current_logprob = logprob.cpu().numpy()[0] 
-        self._current_value = value.cpu().numpy()[0]
-
-        return self._current_action  # type: ignore
-
-    def reset(self, obs: _O, info: dict[str, Any]) -> None:
-        """Start a new episode."""
-        super().reset(obs, info)
-        self._current_obs = np.array(self._last_observation)
-
-    def update(self, obs: _O, reward: float, done: bool, info: dict[str, Any]) -> None:
-        """Update agent with transition data."""
-        super().update(obs, reward, done, info)
-
-        # Store the transition in training mode
-        if self._train_or_eval == "train" and self.step_count < self.cfg.num_steps:
-            self._store_transition(obs, reward, done)
-
-        self._current_obs = np.array(obs)  # type: ignore
-
-    def _store_transition(self, obs: _O, reward: float, done: bool) -> None:
-        """Store transition data for training."""
-        step = self.step_count
-
-        # Store previous step's data
-        if self._last_observation is not None and self._current_action is not None:
-            self.obs_buffer[step, 0] = torch.tensor(
-                self._last_observation, dtype=torch.float32
-            )
-            self.actions_buffer[step, 0] = torch.tensor(
-                self._current_action, dtype=torch.float32
-            )
-            self.logprobs_buffer[step, 0] = torch.tensor(
-                self._current_logprob, dtype=torch.float32
-            )
-            self.rewards_buffer[step, 0] = torch.tensor(reward, dtype=torch.float32)
-            self.dones_buffer[step, 0] = torch.tensor(done, dtype=torch.float32)
-            self.values_buffer[step, 0] = torch.tensor(
-                self._current_value, dtype=torch.float32
-            )
-
-            self.step_count += 1
+        self._last_action = action.cpu().numpy()[0]
+        return action.cpu().numpy()[0]
 
     def train_with_env(self, env: Env) -> list[dict[str, Any]]:
         """Train the PPO agent with environment interaction."""
         self.train()
+        self.setup_storage()
         training_metrics = []
-
         num_iterations = self.cfg.total_timesteps // self.batch_size
 
         for iteration in range(1, num_iterations + 1):
-            # Collect rollout
+            # 1. Collect rollout and store in buffer
             episode_metrics = self._collect_rollout(env)
             training_metrics.extend(episode_metrics)
 
-            # Update policy
-            if self.step_count >= self.cfg.num_steps:
-                update_metrics = self._update_policy()
+            # 2. Update policy with the current buffer
+            update_metrics = self._update_policy()
 
-                # Add update metrics to latest episode if available
-                if training_metrics and update_metrics:
-                    training_metrics[-1].update(update_metrics)
-
-                self.reset_storage()
+            # 3. Add update metrics to latest episode if available
+            if training_metrics and update_metrics:
+                training_metrics[-1].update(update_metrics)
 
             # Learning rate annealing
             if self.cfg.get("anneal_lr", False):
@@ -279,87 +291,9 @@ class PPOAgent(BaseRLAgent[_O, _U]):
 
         return training_metrics
 
-    def _collect_rollout(self, env: Env) -> list[dict[str, Any]]:
-        """Collect a rollout of experience."""
-        episode_metrics = []
-        initial_obs, info = env.reset()
-        self.reset(initial_obs, info)
-
-        episode_reward = 0.0
-        episode_steps = 0
-
-        while self.step_count < self.cfg.num_steps:
-            action = self.step()
-            next_obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-
-            self.update(next_obs, float(reward), done, info)
-
-            episode_reward += float(reward)
-            episode_steps += 1
-            self.global_step += 1
-
-            if done:
-                episode_data = {
-                    "episode_reward": episode_reward,
-                    "episode_steps": episode_steps,
-                    "global_step": self.global_step,
-                }
-                episode_metrics.append(episode_data)
-
-                # Log to tensorboard
-                if self.writer:
-                    self.writer.add_scalar(  # type: ignore
-                        "charts/episodic_return", episode_reward, self.global_step
-                    )
-                    self.writer.add_scalar(  # type: ignore
-                        "charts/episodic_length", episode_steps, self.global_step
-                    )
-
-                episode_reward = 0.0
-                episode_steps = 0
-
-                if self.step_count < self.cfg.num_steps:
-                    obs, info = env.reset()
-                    self.reset(obs, info)
-
-        return episode_metrics
-
     def _update_policy(self) -> dict[str, Any]:
         """Update the policy using PPO."""
         cfg = self.cfg
-
-        # Bootstrap value if not done (for the last step)
-        with torch.no_grad():
-            next_obs = (
-                torch.tensor(self._current_obs, dtype=torch.float32)
-                .unsqueeze(0)
-                .to(self.device)
-            )
-            next_value = self.network.get_value(next_obs).reshape(1, -1)
-
-            # Compute advantages using GAE
-            advantages = torch.zeros_like(self.rewards_buffer).to(self.device)
-            lastgaelam = 0
-
-            for t in reversed(range(cfg.num_steps)):
-                if t == cfg.num_steps - 1:
-                    nextnonterminal = 1.0 - self.dones_buffer[t]
-                    nextvalues = next_value
-                else:
-                    nextnonterminal = 1.0 - self.dones_buffer[t + 1]
-                    nextvalues = self.values_buffer[t + 1]
-
-                delta = (
-                    self.rewards_buffer[t]
-                    + cfg.gamma * nextvalues * nextnonterminal
-                    - self.values_buffer[t]
-                )
-                advantages[t] = lastgaelam = (
-                    delta + cfg.gamma * cfg.gae_lambda * nextnonterminal * lastgaelam
-                )
-
-            returns = advantages + self.values_buffer
 
         # Flatten batch
         obs_shape = self.observation_space.shape
@@ -368,8 +302,8 @@ class PPOAgent(BaseRLAgent[_O, _U]):
         b_obs = self.obs_buffer.reshape((-1,) + obs_shape)
         b_logprobs = self.logprobs_buffer.reshape(-1)
         b_actions = self.actions_buffer.reshape((-1,) + action_shape)
-        b_advantages = advantages.reshape(-1)
-        b_returns = returns.reshape(-1)
+        b_advantages = self.advantages_buffer.reshape(-1)
+        b_returns = self.returns_buffer.reshape(-1)
         b_values = self.values_buffer.reshape(-1)
 
         # Optimize policy for multiple epochs
@@ -455,30 +389,30 @@ class PPOAgent(BaseRLAgent[_O, _U]):
         # Log to tensorboard
         if self.writer:
             self.writer.add_scalar(  # type: ignore
-                "charts/learning_rate", metrics["learning_rate"], self.global_step
+                "charts/learning_rate", metrics["learning_rate"], self.global_train_step
             )
             self.writer.add_scalar(  # type: ignore
-                "losses/value_loss", metrics["value_loss"], self.global_step
+                "losses/value_loss", metrics["value_loss"], self.global_train_step
             )
             self.writer.add_scalar(  # type: ignore
-                "losses/policy_loss", metrics["policy_loss"], self.global_step
+                "losses/policy_loss", metrics["policy_loss"], self.global_train_step
             )
             self.writer.add_scalar(  # type: ignore
-                "losses/entropy", metrics["entropy_loss"], self.global_step
+                "losses/entropy", metrics["entropy_loss"], self.global_train_step
             )
             self.writer.add_scalar(  # type: ignore
-                "losses/old_approx_kl", metrics["old_approx_kl"], self.global_step
+                "losses/old_approx_kl", metrics["old_approx_kl"], self.global_train_step
             )
             self.writer.add_scalar(  # type: ignore
-                "losses/approx_kl", metrics["approx_kl"], self.global_step
+                "losses/approx_kl", metrics["approx_kl"], self.global_train_step
             )
             self.writer.add_scalar(  # type: ignore
-                "losses/clipfrac", metrics["clipfrac"], self.global_step
+                "losses/clipfrac", metrics["clipfrac"], self.global_train_step
             )
             self.writer.add_scalar(  # type: ignore
                 "losses/explained_variance",
                 metrics["explained_variance"],
-                self.global_step,
+                self.global_train_step,
             )
 
         return metrics

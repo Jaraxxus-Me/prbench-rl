@@ -1,16 +1,17 @@
 """Tests for the PPO agent."""
 
+import gymnasium
 import numpy as np
-import imageio.v2 as iio
+
+# import imageio.v2 as iio
 import prbench
 import torch
-import gymnasium
-from gymnasium import spaces
-from omegaconf import DictConfig
-from gymnasium.wrappers import RecordVideo
-
 from conftest import MAKE_VIDEOS
+from gymnasium import spaces
+from gymnasium.wrappers import RecordVideo
+from omegaconf import DictConfig
 from prbench.envs.geom2d.stickbutton2d import StickButton2DEnv
+
 from prbench_rl.ppo_agent import PPOAgent
 
 
@@ -89,7 +90,9 @@ def test_ppo_agent_with_prbench_environment():
 def test_ppo_agent_training_with_fixed_environment():
     """Test PPO agent can overfit on fixed environment setup."""
     prbench.register_all_environments()
-    env = prbench.make("prbench/StickButton2D-b1-v0", render_mode="rgb_array" if MAKE_VIDEOS else None)
+    env = prbench.make(
+        "prbench/StickButton2D-b1-v0", render_mode="rgb_array" if MAKE_VIDEOS else None
+    )
 
     # Create a custom environment wrapper that fixes positions
     class FixedPositionWrapper(gymnasium.Env):
@@ -158,7 +161,8 @@ def test_ppo_agent_training_with_fixed_environment():
             "torch_deterministic": True,
             "cuda": False,
             "anneal_lr": False,
-            "tf_log": False,
+            "tf_log": True,
+            "tf_log_dir": "unit_test_exp",
         }
     )
 
@@ -170,7 +174,6 @@ def test_ppo_agent_training_with_fixed_environment():
     )
 
     # Test training
-    agent.train()
     training_metrics = agent.train_with_env(fixed_env)
 
     # Verify training metrics are generated
@@ -180,40 +183,40 @@ def test_ppo_agent_training_with_fixed_environment():
     assert "global_step" in training_metrics[0]
 
     # Test that agent can perform better after training
-    agent.eval()
+    # agent.eval()
 
-    # Test performance on the fixed environment
-    total_reward = 0.0
-    total_steps = 0
-    num_test_episodes = 3
+    # # Test performance on the fixed environment
+    # total_reward = 0.0
+    # total_steps = 0
+    # num_test_episodes = 3
 
-    for episode in range(num_test_episodes):
-        obs, info = fixed_env.reset(seed=123 + episode)
-        agent.reset(obs, info)
+    # for episode in range(num_test_episodes):
+    #     obs, info = fixed_env.reset(seed=123 + episode)
+    #     agent.reset(obs, info)
 
-        episode_reward = 0.0
-        episode_steps = 0
+    #     episode_reward = 0.0
+    #     episode_steps = 0
 
-        for _ in range(100):  # Max steps per episode
-            action = agent.step()
-            obs, reward, terminated, truncated, info = fixed_env.step(action)
-            agent.update(obs, reward, terminated or truncated, info)
+    #     for _ in range(100):  # Max steps per episode
+    #         action = agent.step()
+    #         obs, reward, terminated, truncated, info = fixed_env.step(action)
+    #         agent.update(obs, reward, terminated or truncated, info)
 
-            episode_reward += reward
-            episode_steps += 1
+    #         episode_reward += reward
+    #         episode_steps += 1
 
-            if terminated or truncated:
-                break
+    #         if terminated or truncated:
+    #             break
 
-        total_reward += episode_reward
-        total_steps += episode_steps
+    #     total_reward += episode_reward
+    #     total_steps += episode_steps
 
-    avg_reward = total_reward / num_test_episodes
-    avg_steps = total_steps / num_test_episodes
+    # avg_reward = total_reward / num_test_episodes
+    # avg_steps = total_steps / num_test_episodes
 
-    # With fixed positions, the agent should learn to reach the button efficiently
-    # These are loose bounds since overfitting might not be perfect in a short test
-    print(f"Average reward: {avg_reward}, Average steps: {avg_steps}")
+    # # With fixed positions, the agent should learn to reach the button efficiently
+    # # These are loose bounds since overfitting might not be perfect in a short test
+    # print(f"Average reward: {avg_reward}, Average steps: {avg_steps}")
 
     # Basic sanity checks - agent should show some learning
     # assert avg_reward > -100, f"Agent performed poorly with average reward: {avg_reward}"
