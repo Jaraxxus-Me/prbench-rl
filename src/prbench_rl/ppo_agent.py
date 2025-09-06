@@ -6,11 +6,10 @@ from typing import Any, TypeVar
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from gymnasium import spaces
 from gymnasium.core import Env
 from omegaconf import DictConfig
+from torch import nn, optim
 from torch.distributions.normal import Normal
 
 try:
@@ -78,6 +77,12 @@ class PPONetwork(nn.Module):
 
         # Learnable log standard deviation (in scaled space)
         self.actor_logstd = nn.Parameter(torch.zeros((1, action_dim)))
+
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Forward pass - delegates to get_action_and_value."""
+        return self.get_action_and_value(x)
 
     def get_value(self, x: torch.Tensor) -> torch.Tensor:
         """Get state value estimate."""
@@ -148,6 +153,20 @@ class PPOAgent(BaseRLAgent[_O, _U]):
             self.network.parameters(), lr=cfg.learning_rate, eps=1e-5
         )
 
+        # Initialize training attributes
+        self.batch_size = 0
+        self.minibatch_size = 0
+        self.global_train_step = 0
+        self.step_count = 0
+        self.obs_buffer: torch.Tensor | None = None
+        self.actions_buffer: torch.Tensor | None = None
+        self.logprobs_buffer: torch.Tensor | None = None
+        self.rewards_buffer: torch.Tensor | None = None
+        self.dones_buffer: torch.Tensor | None = None
+        self.values_buffer: torch.Tensor | None = None
+        self.returns_buffer: torch.Tensor | None = None
+        self.advantages_buffer: torch.Tensor | None = None
+
         # Tensorboard logging
         self.writer = None
         if cfg.get("tf_log", False):
@@ -188,6 +207,15 @@ class PPOAgent(BaseRLAgent[_O, _U]):
 
     def _collect_rollout(self, env: Env) -> list[dict[str, Any]]:
         """Collect a rollout of experience."""
+        # Ensure buffers are initialized
+        assert self.obs_buffer is not None
+        assert self.actions_buffer is not None
+        assert self.logprobs_buffer is not None
+        assert self.rewards_buffer is not None
+        assert self.dones_buffer is not None
+        assert self.values_buffer is not None
+        assert self.advantages_buffer is not None
+
         episode_metrics = []
         next_obs, _ = env.reset()
         next_obs = torch.Tensor(next_obs).to(self.device)
@@ -223,7 +251,8 @@ class PPOAgent(BaseRLAgent[_O, _U]):
                 for info in infos["final_info"]:
                     if info and "episode" in info:
                         print(
-                            f"global_step={self.global_train_step}, episodic_return={info['episode']['r']}"
+                            f"global_step={self.global_train_step}, "
+                            f"episodic_return={info['episode']['r']}"
                         )
                         episode_metrics.append(
                             {
@@ -319,6 +348,16 @@ class PPOAgent(BaseRLAgent[_O, _U]):
     def _update_policy(self) -> dict[str, Any]:
         """Update the policy using PPO."""
         cfg = self.cfg
+
+        # Ensure buffers are initialized
+        assert self.obs_buffer is not None
+        assert self.actions_buffer is not None
+        assert self.logprobs_buffer is not None
+        assert self.rewards_buffer is not None
+        assert self.dones_buffer is not None
+        assert self.values_buffer is not None
+        assert self.returns_buffer is not None
+        assert self.advantages_buffer is not None
 
         # Flatten batch
         obs_shape = self.observation_space.shape

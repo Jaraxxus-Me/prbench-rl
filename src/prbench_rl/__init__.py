@@ -24,6 +24,6 @@ def create_rl_agents(agent_cfg: DictConfig, env: Env, seed: int) -> BaseRLAgent:
 
     if agent_cfg.name == "random":
         return RandomAgent(observation_space, action_space, seed, agent_cfg)
-    elif agent_cfg.name == "ppo":
+    if agent_cfg.name == "ppo":
         return PPOAgent(observation_space, action_space, seed, agent_cfg)
     raise ValueError(f"Unknown agent type: {agent_cfg.name}")
