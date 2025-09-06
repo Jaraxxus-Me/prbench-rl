@@ -169,9 +169,9 @@ class PPOAgent(BaseRLAgent[_O, _U]):
         obs_shape = self.observation_space.shape
         action_shape = self.action_space.shape
         assert obs_shape is not None and action_shape is not None
-        self.obs_buffer = torch.zeros(
-            (cfg.num_steps, cfg.num_envs) + obs_shape
-        ).to(self.device)
+        self.obs_buffer = torch.zeros((cfg.num_steps, cfg.num_envs) + obs_shape).to(
+            self.device
+        )
         self.actions_buffer = torch.zeros(
             (cfg.num_steps, cfg.num_envs) + action_shape
         ).to(self.device)
@@ -182,7 +182,9 @@ class PPOAgent(BaseRLAgent[_O, _U]):
         self.dones_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(self.device)
         self.values_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(self.device)
         self.returns_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(self.device)
-        self.advantages_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(self.device)
+        self.advantages_buffer = torch.zeros((cfg.num_steps, cfg.num_envs)).to(
+            self.device
+        )
 
     def _collect_rollout(self, env: Env) -> list[dict[str, Any]]:
         """Collect a rollout of experience."""
@@ -203,31 +205,44 @@ class PPOAgent(BaseRLAgent[_O, _U]):
             self.actions_buffer[step] = action
             self.logprobs_buffer[step] = logprob
 
-            next_obs, reward, terminated, truncated, infos = env.step(action.squeeze().cpu().numpy())
+            next_obs, reward, terminated, truncated, infos = env.step(
+                action.squeeze().cpu().numpy()
+            )
             if isinstance(terminated, bool):
-                assert self.cfg.num_envs == 1, "num_envs must be 1 if terminated is bool"
+                assert (
+                    self.cfg.num_envs == 1
+                ), "num_envs must be 1 if terminated is bool"
                 next_done = torch.zeros(self.cfg.num_envs).to(self.device)
                 next_done[0] = float(terminated or truncated)
             self.rewards_buffer[step] = torch.tensor(reward).to(self.device)
-            next_obs, next_done = torch.Tensor(next_obs).to(self.device), \
-                torch.Tensor(next_done).to(self.device)
+            next_obs, next_done = torch.Tensor(next_obs).to(self.device), torch.Tensor(
+                next_done
+            ).to(self.device)
 
             if "final_info" in infos:
                 for info in infos["final_info"]:
                     if info and "episode" in info:
-                        print(f"global_step={self.global_train_step}, episodic_return={info['episode']['r']}")
-                        episode_metrics.append({
-                            "global_step": self.global_train_step,
-                            "episodic_return": info["episode"]["r"],
-                            "episodic_length": info["episode"]["l"],
-                        })
+                        print(
+                            f"global_step={self.global_train_step}, episodic_return={info['episode']['r']}"
+                        )
+                        episode_metrics.append(
+                            {
+                                "global_step": self.global_train_step,
+                                "episodic_return": info["episode"]["r"],
+                                "episodic_length": info["episode"]["l"],
+                            }
+                        )
                         # Log to tensorboard
                         if self.writer:
                             self.writer.add_scalar(  # type: ignore
-                                "charts/episodic_return", info["episode"]["r"], self.global_train_step
+                                "charts/episodic_return",
+                                info["episode"]["r"],
+                                self.global_train_step,
                             )
                             self.writer.add_scalar(  # type: ignore
-                                "charts/episodic_length", info["episode"]["l"], self.global_train_step
+                                "charts/episodic_length",
+                                info["episode"]["l"],
+                                self.global_train_step,
                             )
 
         # Bootstrap value if not done
@@ -241,12 +256,22 @@ class PPOAgent(BaseRLAgent[_O, _U]):
                 else:
                     nextnonterminal = 1.0 - self.dones_buffer[t + 1]
                     nextvalues = self.values_buffer[t + 1]
-                delta = self.rewards_buffer[t] + self.cfg.gamma * nextvalues * nextnonterminal - self.values_buffer[t]
-                self.advantages_buffer[t] = lastgaelam = delta + self.cfg.gamma * self.cfg.gae_lambda * nextnonterminal * lastgaelam
+                delta = (
+                    self.rewards_buffer[t]
+                    + self.cfg.gamma * nextvalues * nextnonterminal
+                    - self.values_buffer[t]
+                )
+                self.advantages_buffer[t] = lastgaelam = (
+                    delta
+                    + self.cfg.gamma
+                    * self.cfg.gae_lambda
+                    * nextnonterminal
+                    * lastgaelam
+                )
             self.returns_buffer = self.advantages_buffer + self.values_buffer
 
         return episode_metrics
-    
+
     def _get_action(self) -> _U:
         """Get action from policy."""
         if self._last_observation is None:
